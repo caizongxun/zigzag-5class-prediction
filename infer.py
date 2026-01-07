@@ -7,7 +7,9 @@ from data.fetch_data import CryptoDataFetcher
 from src.zigzag_indicator import ZigZagIndicator
 from src.features import FeatureEngineer
 from src.models import LSTMXGBoostModel
-from src.utils import normalize_data, load_config
+from src.utils import load_config
+import json
+import pickle
 
 def main():
     parser = argparse.ArgumentParser(description='Make predictions with ZigZag Model')
@@ -17,73 +19,119 @@ def main():
     parser.add_argument('--n_candles', type=int, default=10, help='Number of recent candles to show')
     args = parser.parse_args()
     
-    model_dir = Path(args.model)
+    model_dir = Path(args.model) / args.symbol / args.timeframe
     
     print('Step 1: Loading Model Configuration...')
-    train_params = load_config(model_dir / 'train_params.json')
+    
+    # Try loading from symbol-specific directory first, then fallback to root
+    if (model_dir / 'train_params.json').exists():
+        with open(model_dir / 'train_params.json', 'r') as f:
+            train_params = json.load(f)
+        print(f'  Loaded from: {model_dir / "train_params.json"}')
+    elif (Path(args.model) / 'train_params.json').exists():
+        with open(Path(args.model) / 'train_params.json', 'r') as f:
+            train_params = json.load(f)
+        print(f'  Loaded from: {Path(args.model) / "train_params.json"}')
+    else:
+        print(f'ERROR: Could not find train_params.json')
+        print(f'  Searched in: {model_dir}')
+        print(f'  Also searched in: {Path(args.model)}')
+        return
+    
     feature_cols = train_params['feature_columns']
+    print(f'  Features: {len(feature_cols)}')
+    print(f'  Timesteps: {train_params["timesteps"]}')
     
-    print('Step 2: Loading Model...')
-    model = LSTMXGBoostModel(timesteps=60, n_features=len(feature_cols), n_classes=5)
-    model.load(model_dir)
+    print('\nStep 2: Loading LSTM Model...')
+    model = LSTMXGBoostModel(
+        timesteps=train_params['timesteps'],
+        n_features=len(feature_cols),
+        n_classes=train_params['n_classes']
+    )
+    model.load(str(model_dir))
+    print(f'  Model loaded successfully')
     
-    print('Step 3: Fetching Latest Data...')
+    print('\nStep 3: Fetching Latest Data...')
     fetcher = CryptoDataFetcher()
     df = fetcher.fetch_symbol_timeframe(args.symbol, args.timeframe)
     
     if df is None:
-        print(f'Error fetching {args.symbol} {args.timeframe}')
+        print(f'ERROR: Could not fetch {args.symbol} {args.timeframe}')
         return
     
-    print('Step 4: Applying ZigZag Indicator...')
+    print(f'  Data shape: {df.shape}')
+    print(f'  Date range: {df["timestamp"].min()} to {df["timestamp"].max()}')
+    
+    print('\nStep 4: Applying ZigZag Indicator...')
+    zigzag_config = train_params['zigzag_config']
     zigzag = ZigZagIndicator(
-        depth=train_params['zigzag_config']['depth'],
-        deviation=train_params['zigzag_config']['deviation'],
-        backstep=train_params['zigzag_config']['backstep']
+        depth=zigzag_config['depth'],
+        deviation=zigzag_config['deviation'],
+        backstep=zigzag_config.get('backstep', 2)
     )
     df = zigzag.label_kbars(df)
+    print(f'  ZigZag labels applied')
     
-    print('Step 5: Feature Engineering...')
+    print('\nStep 5: Feature Engineering...')
     fe = FeatureEngineer()
     df = fe.calculate_all_features(df)
-    df[feature_cols] = df[feature_cols].fillna(method='ffill').fillna(0)
     
-    print('Step 6: Making Predictions...')
+    # Fill NaN values
+    for col in feature_cols:
+        if col in df.columns:
+            df[col] = df[col].fillna(method='ffill').fillna(0)
+    
+    print(f'  Features computed')
+    
+    print('\nStep 6: Making Predictions...')
+    
+    # Get data for normalization
     mean = np.array(train_params['mean'])
     std = np.array(train_params['std'])
     
     X = df[feature_cols].values
     X_norm = (X - mean) / (std + 1e-8)
     
-    # Get last 60 candles
-    if len(X_norm) >= 60:
-        X_input = X_norm[-60:].reshape(1, 60, -1)
+    # Get last timesteps candles
+    if len(X_norm) >= train_params['timesteps']:
+        X_input = X_norm[-train_params['timesteps']:].reshape(1, train_params['timesteps'], -1)
         
         signal_classes, confidences = model.predict(X_input)
         signal_id = signal_classes[0]
         signal_name = ZigZagIndicator.get_label_name(signal_id)
         confidence = confidences[0]
         
-        print(f'\nLatest Prediction:')
-        print(f'Signal: {signal_name}')
-        print(f'Confidence: {confidence:.2%}')
-        print(f'Timestamp: {df.iloc[-1]["timestamp"] if "timestamp" in df.columns else "N/A"}')
-        print(f'Price: {df.iloc[-1]["close"]:.2f}')
+        print(f'\n=== LATEST PREDICTION ===')
+        print(f'  Signal: {signal_name} (ID: {signal_id})')
+        print(f'  Confidence: {confidence:.2%}')
+        print(f'  Timestamp: {df.iloc[-1]["timestamp"] if "timestamp" in df.columns else "N/A"}')
+        print(f'  Price: ${df.iloc[-1]["close"]:.2f}')
+        print(f'  High: ${df.iloc[-1]["high"]:.2f}')
+        print(f'  Low: ${df.iloc[-1]["low"]:.2f}')
+        print(f'  Volume: {df.iloc[-1]["volume"]:.0f}')
     else:
-        print(f'Not enough data. Need 60 candles, have {len(X_norm)}')
+        print(f'  ERROR: Not enough data. Need {train_params["timesteps"]} candles, have {len(X_norm)}')
         return
     
-    print(f'\nLast {args.n_candles} Candles:')
-    print('\nIdx | Time | Open | High | Low | Close | Signal')
-    print('-' * 60)
+    # Show recent candles
+    print(f'\n=== LAST {args.n_candles} CANDLES ===')
+    print('Idx | Timestamp | Open | High | Low | Close | ZigZag Signal')
+    print('-' * 75)
     
-    for i in range(max(0, len(df) - args.n_candles), len(df)):
+    start_idx = max(0, len(df) - args.n_candles)
+    for i in range(start_idx, len(df)):
         row = df.iloc[i]
         signal_label = zigzag.get_label_name(row['zigzag_label'])
-        time_str = str(row.get('timestamp', 'N/A'))[:16]
-        print(f'{i:3d} | {time_str} | {row["open"]:7.2f} | {row["high"]:7.2f} | {row["low"]:7.2f} | {row["close"]:7.2f} | {signal_label}')
+        time_str = str(row.get('timestamp', 'N/A'))[:19]
+        idx_display = i - (len(df) - args.n_candles)
+        print(f'{idx_display:3d} | {time_str} | {row["open"]:7.2f} | {row["high"]:7.2f} | {row["low"]:7.2f} | {row["close"]:7.2f} | {signal_label}')
     
-    print(f'\nInference complete!')
+    print(f'\n✓ Inference complete!')
+    print(f'\nModel Information:')
+    print(f'  Symbol: {train_params["symbol"]}')
+    print(f'  Timeframe: {train_params["timeframe"]}')
+    print(f'  Total features: {train_params["n_features"]}')
+    print(f'  Model location: {model_dir}')
 
 if __name__ == '__main__':
     main()
