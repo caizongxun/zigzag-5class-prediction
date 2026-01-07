@@ -1,7 +1,6 @@
 import os
 from pathlib import Path
 import pandas as pd
-from datasets import load_dataset
 from huggingface_hub import hf_hub_download
 import json
 
@@ -12,12 +11,13 @@ class CryptoDataFetcher:
     BASE_URL = 'https://huggingface.co/datasets/{}/resolve/main'.format(DATASET_ID)
     
     @staticmethod
-    def fetch_symbol_timeframe(symbol: str = 'BTCUSDT', timeframe: str = '15m'):
+    def fetch_symbol_timeframe(symbol: str = 'BTCUSDT', timeframe: str = '15m', cache_dir: str = './data/raw'):
         """Download OHLCV data for specific symbol and timeframe.
         
         Args:
             symbol: Trading pair (e.g., 'BTCUSDT')
             timeframe: '15m' or '1h'
+            cache_dir: Directory to cache parquet files
             
         Returns:
             DataFrame with OHLCV data or None if failed
@@ -25,27 +25,40 @@ class CryptoDataFetcher:
         print(f'Fetching {symbol}_{timeframe} data...')
         
         try:
-            # Download dataset from Hugging Face
-            dataset = load_dataset(
-                CryptoDataFetcher.DATASET_ID,
-                data_files=f'ohlcv/{symbol}/{timeframe}.parquet',
-                split='train'
+            cache_dir = Path(cache_dir)
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            
+            # File path in HF dataset
+            file_path = f'ohlcv/{symbol}/{timeframe}.parquet'
+            cache_file = cache_dir / f'{symbol}_{timeframe}.parquet'
+            
+            # Download from Hugging Face using hf_hub_download
+            print(f'  Downloading {file_path}...')
+            local_path = hf_hub_download(
+                repo_id=CryptoDataFetcher.DATASET_ID,
+                filename=file_path,
+                repo_type='dataset',
+                cache_dir=str(cache_dir),
+                force_download=False
             )
             
-            df = dataset.to_pandas()
+            # Load parquet file
+            print(f'  Loading parquet file...')
+            df = pd.read_parquet(local_path)
             
-            # Convert timestamp to datetime
+            # Convert timestamp to datetime if it exists
             if 'timestamp' in df.columns:
                 df['timestamp'] = pd.to_datetime(df['timestamp'])
             
             print(f'{symbol}_{timeframe} shape: {df.shape}')
             print(f'Columns: {list(df.columns)}')
-            print(f'Date range: {df["timestamp"].min()} to {df["timestamp"].max()}')
+            if 'timestamp' in df.columns:
+                print(f'Date range: {df["timestamp"].min()} to {df["timestamp"].max()}')
             
             return df
             
         except Exception as e:
-            print(f'Error fetching {symbol}_{timeframe}: {e}')
+            print(f'Error fetching {symbol}_{timeframe}: {type(e).__name__}: {str(e)[:200]}')
             return None
     
     @staticmethod
@@ -69,43 +82,49 @@ class CryptoDataFetcher:
         output_path.mkdir(parents=True, exist_ok=True)
         
         try:
-            # Classification model
+            # Classification model file paths in HF dataset
             model_file = f'v1_model/{symbol}/{timeframe}/classification.h5'
             params_file = f'v1_model/{symbol}/{timeframe}/params.json'
             
-            model_url = f'{CryptoDataFetcher.BASE_URL}/{model_file}'
-            params_url = f'{CryptoDataFetcher.BASE_URL}/{params_file}'
-            
+            # Download model
             print(f'  Downloading classification.h5...')
-            model_path = output_path / 'classification.h5'
-            hf_hub_download(
+            model_path = hf_hub_download(
                 repo_id=CryptoDataFetcher.DATASET_ID,
                 filename=model_file,
                 repo_type='dataset',
-                local_dir='./models/trained',
-                local_dir_use_symlinks=False,
-                force_filename=str(model_path)
+                cache_dir=str(output_path.parent.parent),
+                force_download=False
             )
             
+            # Copy to expected location
+            import shutil
+            final_model_path = output_path / 'classification.h5'
+            shutil.copy(model_path, final_model_path)
+            print(f'    Saved to: {final_model_path}')
+            
+            # Download params
             print(f'  Downloading params.json...')
-            params_path = output_path / 'params.json'
-            hf_hub_download(
+            params_path_dl = hf_hub_download(
                 repo_id=CryptoDataFetcher.DATASET_ID,
                 filename=params_file,
                 repo_type='dataset',
-                local_dir='./models/trained',
-                local_dir_use_symlinks=False,
-                force_filename=str(params_path)
+                cache_dir=str(output_path.parent.parent),
+                force_download=False
             )
             
-            print(f'  ✓ {symbol}_{timeframe} classifier downloaded successfully')
-            print(f'    Model: {model_path}')
-            print(f'    Params: {params_path}')
+            # Copy to expected location
+            final_params_path = output_path / 'params.json'
+            shutil.copy(params_path_dl, final_params_path)
+            print(f'    Saved to: {final_params_path}')
             
-            return model_path, params_path
+            print(f'  ✓ {symbol}_{timeframe} classifier downloaded successfully')
+            print(f'    Model: {final_model_path}')
+            print(f'    Params: {final_params_path}')
+            
+            return final_model_path, final_params_path
             
         except Exception as e:
-            print(f'  Error downloading {symbol}_{timeframe} classifier: {e}')
+            print(f'  Error downloading {symbol}_{timeframe} classifier: {type(e).__name__}: {str(e)[:200]}')
             return None, None
     
     @staticmethod
@@ -131,6 +150,7 @@ class CryptoDataFetcher:
                 return None, None
             
             # Load model
+            print(f'Loading TensorFlow model: {model_path}')
             model = tf.keras.models.load_model(model_path)
             
             # Load params
@@ -144,7 +164,7 @@ class CryptoDataFetcher:
             return model, params
             
         except Exception as e:
-            print(f'Error loading classifier: {e}')
+            print(f'Error loading classifier: {type(e).__name__}: {str(e)}')
             return None, None
 
 if __name__ == '__main__':
@@ -156,6 +176,8 @@ if __name__ == '__main__':
     
     if df is not None:
         print(f'Data downloaded: {len(df)} candles')
+    else:
+        print('Failed to download data')
     
     # Download classifier for this symbol/timeframe
     model_path, params_path = CryptoDataFetcher.download_classifier('BTCUSDT', '15m')
@@ -167,5 +189,7 @@ if __name__ == '__main__':
         model, params = CryptoDataFetcher.load_classifier('BTCUSDT', '15m')
         if model:
             print('✓ Classifier loaded successfully')
+        else:
+            print('✗ Failed to load classifier')
     else:
         print('✗ Failed to download classifier')
