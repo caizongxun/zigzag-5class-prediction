@@ -22,8 +22,23 @@ def main():
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    print('Step 1: Downloading Stage 1 Classifier...')
-    CryptoDataFetcher.download_stage1_classifier('lstm_validity')
+    print('Step 1: Downloading Symbol-Specific Classifier...')
+    print(f'  Symbol: {args.symbol}')
+    print(f'  Timeframe: {args.timeframe}')
+    print(f'  Note: Each symbol/timeframe has its OWN classification model')
+    print(f'  Location: v1_model/{args.symbol}/{args.timeframe}/')
+    
+    model_path, params_path = CryptoDataFetcher.download_classifier(
+        args.symbol, 
+        args.timeframe,
+        output_dir=str(output_dir)
+    )
+    
+    if not model_path:
+        print(f'ERROR: Could not download classifier for {args.symbol} {args.timeframe}')
+        print(f'  Verify that {args.symbol} exists in the dataset')
+        print(f'  Available symbols typically include: BTCUSDT, ETHUSDT, BNBUSDT, etc.')
+        return
     
     print('\nStep 2: Fetching Data...')
     fetcher = CryptoDataFetcher()
@@ -136,11 +151,14 @@ def main():
         'backstep': zigzag.backstep
     }
     train_params['model_metrics'] = metrics
+    train_params['classifier_path'] = str(model_path)
+    train_params['classifier_params'] = params_path
     
     save_config(train_params, output_dir / 'train_params.json')
     
     print(f'\nAll models saved to {output_dir}')
-    print('\nTraining complete! You can now use the model for inference.')
+    print(f'\nTraining complete!')
+    print(f'Next: Run inference with: python infer.py --model {output_dir}')
 
 if __name__ == '__main__':
     main()
