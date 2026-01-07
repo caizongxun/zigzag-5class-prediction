@@ -1,133 +1,171 @@
 import os
-import pandas as pd
-import numpy as np
 from pathlib import Path
-from huggingface_hub import hf_hub_download
+import pandas as pd
 from datasets import load_dataset
-import pickle
+from huggingface_hub import hf_hub_download
 import json
-import warnings
-
-warnings.filterwarnings('ignore')
 
 class CryptoDataFetcher:
-    HF_DATASET_ID = 'zongowo111/v2-crypto-ohlcv-data'
-    HF_STAGE1_REPO = 'zongowo111/BB-Bounce-Validity-Classifier-Stage1'
+    """Download OHLCV data and symbol-specific classifiers from Hugging Face."""
     
-    TIMEFRAMES = {
-        '15m': 'BTC_15m.parquet',
-        '1h': 'BTC_1h.parquet',
-    }
+    DATASET_ID = 'zongowo111/v2-crypto-ohlcv-data'
+    BASE_URL = 'https://huggingface.co/datasets/{}/resolve/main'.format(DATASET_ID)
     
-    def __init__(self, cache_dir='./data/raw'):
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+    @staticmethod
+    def fetch_symbol_timeframe(symbol: str = 'BTCUSDT', timeframe: str = '15m'):
+        """Download OHLCV data for specific symbol and timeframe.
         
-    def fetch_symbol_timeframe(self, symbol, timeframe='15m'):
-        filename = f'{symbol.replace("USDT", "")}_{timeframe}.parquet'
-        file_path = self.cache_dir / 'datasets--zongowo111--v2-crypto-ohlcv-data' / 'klines' / symbol / filename
-        
-        if file_path.exists():
-            df = pd.read_parquet(file_path)
-            return df
+        Args:
+            symbol: Trading pair (e.g., 'BTCUSDT')
+            timeframe: '15m' or '1h'
+            
+        Returns:
+            DataFrame with OHLCV data or None if failed
+        """
+        print(f'Fetching {symbol}_{timeframe} data...')
         
         try:
+            # Download dataset from Hugging Face
             dataset = load_dataset(
-                self.HF_DATASET_ID,
-                data_files=f'klines/{symbol}/{filename}',
-                cache_dir=str(self.cache_dir)
+                CryptoDataFetcher.DATASET_ID,
+                data_files=f'ohlcv/{symbol}/{timeframe}.parquet',
+                split='train'
             )
-            df = dataset['train'].to_pandas()
+            
+            df = dataset.to_pandas()
+            
+            # Convert timestamp to datetime
+            if 'timestamp' in df.columns:
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+            
+            print(f'{symbol}_{timeframe} shape: {df.shape}')
+            print(f'Columns: {list(df.columns)}')
+            print(f'Date range: {df["timestamp"].min()} to {df["timestamp"].max()}')
+            
             return df
+            
         except Exception as e:
-            print(f'Error downloading {symbol} {timeframe}: {str(e)}')
+            print(f'Error fetching {symbol}_{timeframe}: {e}')
             return None
     
     @staticmethod
-    def download_stage1_classifier(model_type='lstm_validity', cache_dir='./models/stage1'):
-        cache_dir = Path(cache_dir)
-        cache_dir.mkdir(parents=True, exist_ok=True)
+    def download_classifier(symbol: str, timeframe: str, output_dir: str = './models/trained'):
+        """Download symbol and timeframe-specific classifier.
         
-        files_to_download = {
-            'lstm_validity': [
-                'lstm_validity_model.h5',
-                'lstm_validity_scaler.pkl',
-                'lstm_validity_config.json'
-            ],
-            'gbm_validity': [
-                'gbm_validity_model.pkl',
-                'gbm_validity_scaler.pkl',
-                'gbm_validity_config.json'
-            ],
-            'position_classifier': [
-                'position_classifier_model.h5',
-                'position_classifier_scaler.pkl',
-                'position_classifier_config.json'
-            ]
-        }
+        CRITICAL: This is NOT a separate Stage1 classifier.
+        Each symbol/timeframe has its OWN classification model in v1_model/SYMBOL/TIMEFRAME/
         
-        if model_type not in files_to_download:
-            print(f'Available models: {list(files_to_download.keys())}')
-            return None
+        Args:
+            symbol: Trading pair (e.g., 'BTCUSDT')
+            timeframe: '15m' or '1h'
+            output_dir: Where to save the classifier
+            
+        Returns:
+            Tuple of (model_path, params_path) or (None, None) if failed
+        """
+        print(f'\nDownloading {symbol} {timeframe} Classifier...')
         
-        print(f'Downloading Stage 1 {model_type} classifier...')
-        
-        downloaded_files = {}
-        for file_name in files_to_download[model_type]:
-            try:
-                local_path = hf_hub_download(
-                    repo_id=CryptoDataFetcher.HF_STAGE1_REPO,
-                    filename=file_name,
-                    cache_dir=str(cache_dir),
-                    force_download=False
-                )
-                downloaded_files[file_name] = local_path
-                print(f'  Downloaded: {file_name}')
-            except Exception as e:
-                print(f'  Error downloading {file_name}: {str(e)}')
-        
-        return downloaded_files
-    
-    @staticmethod
-    def load_stage1_model(model_type='lstm_validity', model_dir='./models/stage1'):
-        import tensorflow as tf
-        
-        model_dir = Path(model_dir)
-        model_file = model_dir / f'{model_type}_model.h5'
-        scaler_file = model_dir / f'{model_type}_scaler.pkl'
-        config_file = model_dir / f'{model_type}_config.json'
-        
-        if not model_file.exists():
-            print(f'Model file not found: {model_file}')
-            print('Attempting to download from Hugging Face...')
-            CryptoDataFetcher.download_stage1_classifier(model_type, model_dir.parent)
+        output_path = Path(output_dir) / symbol / timeframe
+        output_path.mkdir(parents=True, exist_ok=True)
         
         try:
-            model = tf.keras.models.load_model(str(model_file))
+            # Classification model
+            model_file = f'v1_model/{symbol}/{timeframe}/classification.h5'
+            params_file = f'v1_model/{symbol}/{timeframe}/params.json'
             
-            with open(scaler_file, 'rb') as f:
-                scaler = pickle.load(f)
+            model_url = f'{CryptoDataFetcher.BASE_URL}/{model_file}'
+            params_url = f'{CryptoDataFetcher.BASE_URL}/{params_file}'
             
-            with open(config_file, 'r') as f:
-                config = json.load(f)
+            print(f'  Downloading classification.h5...')
+            model_path = output_path / 'classification.h5'
+            hf_hub_download(
+                repo_id=CryptoDataFetcher.DATASET_ID,
+                filename=model_file,
+                repo_type='dataset',
+                local_dir='./models/trained',
+                local_dir_use_symlinks=False,
+                force_filename=str(model_path)
+            )
             
-            return model, scaler, config
+            print(f'  Downloading params.json...')
+            params_path = output_path / 'params.json'
+            hf_hub_download(
+                repo_id=CryptoDataFetcher.DATASET_ID,
+                filename=params_file,
+                repo_type='dataset',
+                local_dir='./models/trained',
+                local_dir_use_symlinks=False,
+                force_filename=str(params_path)
+            )
+            
+            print(f'  ✓ {symbol}_{timeframe} classifier downloaded successfully')
+            print(f'    Model: {model_path}')
+            print(f'    Params: {params_path}')
+            
+            return model_path, params_path
+            
         except Exception as e:
-            print(f'Error loading model: {str(e)}')
-            return None, None, None
-
+            print(f'  Error downloading {symbol}_{timeframe} classifier: {e}')
+            return None, None
+    
+    @staticmethod
+    def load_classifier(symbol: str, timeframe: str, model_dir: str = './models/trained'):
+        """Load downloaded classifier.
+        
+        Args:
+            symbol: Trading pair (e.g., 'BTCUSDT')
+            timeframe: '15m' or '1h'
+            model_dir: Directory containing classifiers
+            
+        Returns:
+            Tuple of (model, params) or (None, None)
+        """
+        try:
+            import tensorflow as tf
+            
+            model_path = Path(model_dir) / symbol / timeframe / 'classification.h5'
+            params_path = Path(model_dir) / symbol / timeframe / 'params.json'
+            
+            if not model_path.exists():
+                print(f'Model not found: {model_path}')
+                return None, None
+            
+            # Load model
+            model = tf.keras.models.load_model(model_path)
+            
+            # Load params
+            with open(params_path, 'r') as f:
+                params = json.load(f)
+            
+            print(f'Loaded {symbol}_{timeframe} classifier')
+            print(f'  Accuracy: {params.get("accuracy", "N/A")}')
+            print(f'  F1-Score: {params.get("f1_score", "N/A")}')
+            
+            return model, params
+            
+        except Exception as e:
+            print(f'Error loading classifier: {e}')
+            return None, None
 
 if __name__ == '__main__':
-    print('Fetching BTC_15m data...')
-    fetcher = CryptoDataFetcher()
-    btc_15m = fetcher.fetch_symbol_timeframe('BTCUSDT', '15m')
+    # Example: Download BTC 15m data and classifier
+    print('=== Downloading Data and Classifier ===')
     
-    if btc_15m is not None:
-        print(f'BTC_15m shape: {btc_15m.shape}')
-        print(f'Columns: {list(btc_15m.columns)}')
-        print(f'Date range: {btc_15m["timestamp"].min()} to {btc_15m["timestamp"].max()}')
+    # Download data
+    df = CryptoDataFetcher.fetch_symbol_timeframe('BTCUSDT', '15m')
     
-    print('\nDownloading Stage 1 Classifier...')
-    files = CryptoDataFetcher.download_stage1_classifier('lstm_validity')
-    if files:
-        print(f'Successfully downloaded {len(files)} files')
+    if df is not None:
+        print(f'Data downloaded: {len(df)} candles')
+    
+    # Download classifier for this symbol/timeframe
+    model_path, params_path = CryptoDataFetcher.download_classifier('BTCUSDT', '15m')
+    
+    if model_path:
+        print(f'\nClassifier files ready for training')
+        
+        # Load and verify
+        model, params = CryptoDataFetcher.load_classifier('BTCUSDT', '15m')
+        if model:
+            print('✓ Classifier loaded successfully')
+    else:
+        print('✗ Failed to download classifier')
