@@ -14,12 +14,14 @@ class CryptoDataFetcher:
     def fetch_symbol_timeframe(symbol: str = 'BTCUSDT', timeframe: str = '15m', cache_dir: str = './data/raw'):
         """Download OHLCV data for specific symbol and timeframe.
         
-        IMPORTANT: The HF dataset uses a flat naming structure:
-        BTC15m.parquet, BTC1h.parquet, ETH15m.parquet, etc.
-        NOT: ohlcv/BTCUSDT/15m.parquet
+        CORRECT STRUCTURE (verified from HF):
+        klines/BTCUSDT/BTC_15m.parquet
+        klines/BTCUSDT/BTC_1h.parquet
+        klines/ETHUSDT/ETH_15m.parquet
+        etc.
         
         Args:
-            symbol: Trading pair (e.g., 'BTCUSDT' or 'BTC')
+            symbol: Trading pair (e.g., 'BTCUSDT')
             timeframe: '15m' or '1h'
             cache_dir: Directory to cache parquet files
             
@@ -32,58 +34,39 @@ class CryptoDataFetcher:
             cache_dir = Path(cache_dir)
             cache_dir.mkdir(parents=True, exist_ok=True)
             
-            # Try different file naming conventions used in the dataset
-            # Convention 1: BTCUSDT_15m.parquet (underscore)
-            # Convention 2: BTC15m.parquet (abbreviated without underscore)
-            # Convention 3: ohlcv/BTCUSDT/15m.parquet (nested)
+            # Extract symbol prefix (BTC from BTCUSDT)
+            symbol_prefix = symbol.replace('USDT', '').upper()
             
-            file_attempts = [
-                f'{symbol}_{timeframe}.parquet',  # BTCUSDT_15m.parquet
-                f'{symbol}{timeframe}.parquet',   # BTCUSDT15m.parquet
-                f'{symbol.replace("USDT", "")}{timeframe}.parquet',  # BTC15m.parquet
-                f'ohlcv/{symbol}/{timeframe}.parquet',  # nested structure
-            ]
+            # Correct file path structure
+            file_path = f'klines/{symbol}/{symbol_prefix}_{timeframe}.parquet'
             
-            for file_path in file_attempts:
-                try:
-                    print(f'  Attempting: {file_path}...')
-                    # Download from Hugging Face using hf_hub_download
-                    local_path = hf_hub_download(
-                        repo_id=CryptoDataFetcher.DATASET_ID,
-                        filename=file_path,
-                        repo_type='dataset',
-                        cache_dir=str(cache_dir),
-                        force_download=False,
-                        timeout=30
-                    )
-                    
-                    print(f'  Successfully found: {file_path}')
-                    # Load parquet file
-                    print(f'  Loading parquet file...')
-                    df = pd.read_parquet(local_path)
-                    
-                    # Convert timestamp to datetime if it exists
-                    if 'timestamp' in df.columns:
-                        df['timestamp'] = pd.to_datetime(df['timestamp'])
-                    
-                    print(f'{symbol}_{timeframe} shape: {df.shape}')
-                    print(f'Columns: {list(df.columns)}')
-                    if 'timestamp' in df.columns:
-                        print(f'Date range: {df["timestamp"].min()} to {df["timestamp"].max()}')
-                    
-                    return df
-                    
-                except Exception as e:
-                    continue
+            print(f'  Downloading: {file_path}...')
+            # Download from Hugging Face using hf_hub_download
+            local_path = hf_hub_download(
+                repo_id=CryptoDataFetcher.DATASET_ID,
+                filename=file_path,
+                repo_type='dataset',
+                cache_dir=str(cache_dir),
+                force_download=False
+            )
             
-            # If all attempts failed
-            print(f'Error: Could not find {symbol}_{timeframe} in dataset')
-            print(f'  Tried paths: {file_attempts}')
-            print(f'  Please verify symbol and timeframe are correct')
-            return None
+            print(f'  Loading parquet file...')
+            df = pd.read_parquet(local_path)
+            
+            # Convert timestamp to datetime if it exists
+            if 'timestamp' in df.columns:
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+            
+            print(f'{symbol}_{timeframe} shape: {df.shape}')
+            print(f'Columns: {list(df.columns)}')
+            if 'timestamp' in df.columns:
+                print(f'Date range: {df["timestamp"].min()} to {df["timestamp"].max()}')
+            
+            return df
             
         except Exception as e:
             print(f'Error fetching {symbol}_{timeframe}: {type(e).__name__}: {str(e)[:200]}')
+            print(f'  Expected path: klines/{symbol}/{symbol.replace("USDT", "").upper()}_{timeframe}.parquet')
             return None
     
     @staticmethod
@@ -117,8 +100,7 @@ class CryptoDataFetcher:
                 filename=model_file,
                 repo_type='dataset',
                 cache_dir=str(output_path.parent.parent),
-                force_download=False,
-                timeout=60
+                force_download=False
             )
             
             # Copy to expected location
@@ -134,8 +116,7 @@ class CryptoDataFetcher:
                 filename=params_file,
                 repo_type='dataset',
                 cache_dir=str(output_path.parent.parent),
-                force_download=False,
-                timeout=30
+                force_download=False
             )
             
             # Copy to expected location
@@ -199,17 +180,13 @@ if __name__ == '__main__':
     # Example: Download BTC 15m data and classifier
     print('=== Downloading Data and Classifier ===')
     
-    # Download data - try BTC instead of BTCUSDT
+    # Download data
     df = CryptoDataFetcher.fetch_symbol_timeframe('BTCUSDT', '15m')
-    
-    if df is None:
-        print('\nTrying alternative symbol format (BTC instead of BTCUSDT)...')
-        df = CryptoDataFetcher.fetch_symbol_timeframe('BTC', '15m')
     
     if df is not None:
         print(f'\nData downloaded successfully: {len(df)} candles')
     else:
-        print('Failed to download data - check symbol and timeframe')
+        print('\nFailed to download data')
     
     # Download classifier for this symbol/timeframe
     model_path, params_path = CryptoDataFetcher.download_classifier('BTCUSDT', '15m')
@@ -224,4 +201,4 @@ if __name__ == '__main__':
         else:
             print('✗ Failed to load classifier')
     else:
-        print('✗ Failed to download classifier')
+        print('\n✗ Failed to download classifier')
