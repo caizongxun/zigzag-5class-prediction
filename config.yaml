@@ -1,0 +1,67 @@
+project:
+  name: ZigZag 5-Class Prediction
+  version: v1.0
+  description: Predicts ZigZag price structure patterns (HH/HL/LH/LL)
+
+data:
+  source: huggingface
+  hf_dataset: zongowo111/v2-crypto-ohlcv-data
+  hf_stage1_repo: zongowo111/BB-Bounce-Validity-Classifier-Stage1
+  cache_dir: ./data/raw
+  symbols:
+    - BTCUSDT
+    - ETHUSDT
+  timeframes:
+    - 15m
+    - 1h
+
+zigzag:
+  depth: 12
+  deviation: 5
+  backstep: 2
+
+features:
+  lookback_periods:
+    - 5
+    - 10
+    - 20
+    - 50
+    - 200
+  n_features_target: 50-60
+  normalization: zscore
+
+model:
+  type: lstm_xgboost
+  lstm:
+    timesteps: 60
+    layers:
+      - 128
+      - 64
+    dropout: 0.3
+    activation: relu
+  xgboost:
+    n_estimators: 150
+    max_depth: 6
+    learning_rate: 0.05
+    subsample: 0.8
+    colsample_bytree: 0.8
+  output_classes: 5
+
+training:
+  train_ratio: 0.7
+  val_ratio: 0.15
+  test_ratio: 0.15
+  epochs: 100
+  batch_size: 32
+  early_stopping_patience: 10
+  validation_split: 0.2
+
+stage1_classifier:
+  model_type: lstm_validity
+  download_on_startup: true
+  cache_dir: ./models/stage1
+
+output:
+  model_save_dir: ./models/trained
+  predictions_save_dir: ./predictions
+  logs_dir: ./logs
