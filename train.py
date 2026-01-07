@@ -10,6 +10,8 @@ from src.models import LSTMXGBoostModel
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import TimeSeriesSplit
 import warnings
+import json
+import pickle
 warnings.filterwarnings('ignore')
 
 def main():
@@ -20,8 +22,8 @@ def main():
     parser.add_argument('--epochs', type=int, default=100, help='Training epochs')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
     parser.add_argument('--timesteps', type=int, default=60, help='Sequence length for LSTM')
-    parser.add_argument('--zigzag_depth', type=int, default=12, help='ZigZag depth parameter')
-    parser.add_argument('--zigzag_deviation', type=int, default=5, help='ZigZag deviation parameter (%)')
+    parser.add_argument('--zigzag_depth', type=int, default=10, help='ZigZag depth parameter')
+    parser.add_argument('--zigzag_deviation', type=float, default=2.5, help='ZigZag deviation parameter (%)')
     args = parser.parse_args()
     
     output_dir = Path(args.output)
@@ -67,16 +69,28 @@ def main():
     # ============================================
     print('\nStep 3: Applying ZigZag Indicator...')
     print(f'  Depth: {args.zigzag_depth}, Deviation: {args.zigzag_deviation}%')
+    print(f'  WARNING: Adjusting ZigZag for better label distribution...')
     
     zigzag = ZigZagIndicator(depth=args.zigzag_depth, deviation=args.zigzag_deviation, backstep=2)
     df = zigzag.label_kbars(df)
     
     label_distribution = df['zigzag_label'].value_counts().sort_index()
     print(f'  ZigZag Labels:')
+    total_labels = len(df)
     for label_id, count in label_distribution.items():
         label_name = ZigZagIndicator.get_label_name(label_id)
-        pct = (count / len(df)) * 100
-        print(f'    {label_name} ({label_id}): {count} ({pct:.1f}%)')
+        pct = (count / total_labels) * 100
+        print(f'    {label_name} ({label_id}): {count} ({pct:.2f}%)')
+    
+    # Check for severe class imbalance
+    max_class_pct = (label_distribution.max() / total_labels) * 100
+    if max_class_pct > 95:
+        print(f'\n  ⚠️  WARNING: Severe class imbalance detected ({max_class_pct:.1f}% in one class)')
+        print(f'     This will cause the model to overfit to the majority class!')
+        print(f'     Suggestions:')
+        print(f'       - Reduce ZigZag depth: --zigzag_depth 8')
+        print(f'       - Reduce deviation: --zigzag_deviation 2.0')
+        print(f'       - Try different parameters: --zigzag_depth 6 --zigzag_deviation 1.5')
     
     # ============================================
     # STEP 4: Feature Engineering
@@ -156,7 +170,8 @@ def main():
     print(f'  Train sequences: {X_train_seq.shape}')
     print(f'  Val sequences: {X_val_seq.shape}')
     print(f'  Test sequences: {X_test_seq.shape}')
-    print(f'  Class distribution in train: {np.unique(y_train_seq, return_counts=True)}')
+    unique_train, counts_train = np.unique(y_train_seq, return_counts=True)
+    print(f'  Train class distribution: {dict(zip(unique_train, counts_train))}')
     
     # ============================================
     # STEP 8: Training Model
@@ -210,7 +225,6 @@ def main():
     model.save(str(symbol_model_dir))
     
     # Save scaler for later inference
-    import pickle
     scaler_path = symbol_model_dir / 'scaler.pkl'
     with open(scaler_path, 'wb') as f:
         pickle.dump(scaler, f)
@@ -221,6 +235,33 @@ def main():
     with open(feature_cols_path, 'wb') as f:
         pickle.dump(feature_cols, f)
     print(f'  Feature columns saved to {feature_cols_path}')
+    
+    # Save training parameters for inference
+    train_params = {
+        'symbol': args.symbol,
+        'timeframe': args.timeframe,
+        'timesteps': args.timesteps,
+        'n_features': len(feature_cols),
+        'n_classes': 5,
+        'feature_columns': feature_cols,
+        'zigzag_config': {
+            'depth': args.zigzag_depth,
+            'deviation': args.zigzag_deviation,
+            'backstep': 2
+        },
+        'mean': scaler.mean_.tolist(),
+        'std': scaler.scale_.tolist()
+    }
+    
+    train_params_path = symbol_model_dir / 'train_params.json'
+    with open(train_params_path, 'w') as f:
+        json.dump(train_params, f, indent=2)
+    print(f'  Training params saved to {train_params_path}')
+    
+    # Also save to root models directory for backward compatibility
+    root_train_params_path = Path(args.output) / 'train_params.json'
+    with open(root_train_params_path, 'w') as f:
+        json.dump(train_params, f, indent=2)
     
     # Save training metadata
     metadata = {
@@ -233,12 +274,14 @@ def main():
         'zigzag_deviation': args.zigzag_deviation,
         'test_accuracy': float(test_results['accuracy']),
         'test_f1': float(test_results['f1']),
+        'test_precision': float(test_results['precision']),
+        'test_recall': float(test_results['recall']),
         'train_samples': len(X_train_seq),
         'val_samples': len(X_val_seq),
-        'test_samples': len(X_test_seq)
+        'test_samples': len(X_test_seq),
+        'class_distribution': dict(zip(unique_train.tolist(), counts_train.tolist()))
     }
     
-    import json
     metadata_path = symbol_model_dir / 'metadata.json'
     with open(metadata_path, 'w') as f:
         json.dump(metadata, f, indent=2)
@@ -258,11 +301,14 @@ def main():
     print(f'\nModel Performance:')
     print(f'  Test Accuracy: {test_results["accuracy"]:.4f}')
     print(f'  Test F1-Score: {test_results["f1"]:.4f}')
+    print(f'  Test Precision: {test_results["precision"]:.4f}')
+    print(f'  Test Recall: {test_results["recall"]:.4f}')
     print(f'\nModel Location: {symbol_model_dir}')
     print(f'  - LSTM Model: {symbol_model_dir / "lstm_model.h5"}')
     print(f'  - Config: {symbol_model_dir / "config.json"}')
     print(f'  - Scaler: {symbol_model_dir / "scaler.pkl"}')
     print(f'  - Features: {symbol_model_dir / "feature_columns.pkl"}')
+    print(f'  - Train Params: {symbol_model_dir / "train_params.json"}')
     print(f'  - Metadata: {symbol_model_dir / "metadata.json"}')
     print(f'\nNext Steps:')
     print(f'  1. Use infer.py to make predictions on new data')
